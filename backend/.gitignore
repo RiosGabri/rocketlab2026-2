@@ -12,3 +12,4 @@ htmlcov/
 *.db-wal
 *.db-journal
 *.sqlite3
+data/
