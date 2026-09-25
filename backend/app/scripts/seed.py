@@ -3,6 +3,10 @@
 Uso (dentro de backend/, depois de `alembic upgrade head`):
     python -m app.scripts.seed --limit 4000 --reset   -> subconjunto dos filmes mais votados
     python -m app.scripts.seed --reset                -> carga completa
+    python -m app.scripts.seed                        -> sem --reset, com o catálogo já
+                                                          carregado: só completa movies_reviews.csv
+                                                          se ele estiver presente e ainda não
+                                                          tiver sido carregado
 Os CSVs são procurados (recursivamente) em backend/data/ ou no diretório passado
 em --data-dir, então os zips podem ser extraídos ali do jeito que vieram.
 """
@@ -52,6 +56,11 @@ CSV_TO_TABLE = {
     "movies_reviews": "movie_reviews",
 }
 
+# CSVs de CSV_TO_TABLE que podem estar ausentes sem abortar a carga: o README
+# documenta movies_reviews como uma segunda etapa (importar filmes primeiro,
+# reviews depois), não parte do lote inicial dos nove CSVs da camada Diamond.
+OPTIONAL_CSVS = {"movies_reviews"}
+
 # Filhos antes dos pais, para limpar sem depender de chaves estrangeiras.
 DELETE_ORDER = [
     "movie_reviews",
@@ -88,7 +97,8 @@ def find_csvs(data_dir: Path) -> dict[str, Path]:
             path for path in sorted(data_dir.rglob(f"{name}.csv")) if "__MACOSX" not in path.parts
         ]
         if not matches:
-            missing.append(f"{name}.csv")
+            if name not in OPTIONAL_CSVS:
+                missing.append(f"{name}.csv")
         elif len(matches) > 1:
             listed = ", ".join(str(path) for path in matches)
             raise SeedError(f"Mais de um {name}.csv em {data_dir}: {listed}")
@@ -225,6 +235,52 @@ def select_top_movies(files: dict[str, Path], limit: int) -> set[str]:
     return {movie_id for _, _, movie_id in ranking[:limit]}
 
 
+def load_movies_reviews_only(engine: Any, files: dict[str, Path], tables: Any) -> None:
+    """Segunda etapa do fluxo do README: catálogo já carregado, só falta movies_reviews.
+
+    Chamada por `run()` quando `dim_movies` já tem linhas e `--reset` não foi passado.
+    Não mexe em nenhuma outra tabela; filtra as avaliações pelos filmes que já
+    existem no banco (não reaplica --limit, que só faz sentido na carga inicial).
+    """
+
+    if "movies_reviews" not in files:
+        raise SeedError(
+            "O banco já tem filmes carregados e movies_reviews.csv não foi encontrado; "
+            "nada a fazer. Use --reset para recarregar tudo do zero."
+        )
+
+    with engine.connect() as conn:
+        already_has_reviews = conn.scalar(
+            select(func.count()).select_from(tables["movie_reviews"])
+        )
+    if already_has_reviews:
+        raise SeedError(
+            f"O banco já tem {already_has_reviews} avaliações carregadas. "
+            "Use --reset para recarregar tudo do zero."
+        )
+
+    with engine.begin() as conn:
+        existing_movie_ids = set(
+            conn.execute(select(tables["dim_movies"].c.sk_movie_id)).scalars().all()
+        )
+        print("Carregando movies_reviews...")
+        inserted = load_table(
+            conn,
+            files["movies_reviews"],
+            tables["movie_reviews"],
+            keep=in_set("sk_movie_id", existing_movie_ids),
+        )
+
+        violations = conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise SeedError(
+                f"{len(violations)} violações de chave estrangeira; carga desfeita. "
+                f"Primeira: {tuple(violations[0])}"
+            )
+
+    print(f"\nmovie_reviews: {inserted} linhas inseridas.")
+
+
 def run(data_dir: Path, limit: int | None, reset: bool) -> None:
     files = find_csvs(data_dir)
     tables = Base.metadata.tables
@@ -246,9 +302,9 @@ def run(data_dir: Path, limit: int | None, reset: bool) -> None:
     with engine.connect() as conn:
         already_loaded = conn.scalar(select(func.count()).select_from(tables["dim_movies"]))
     if already_loaded and not reset:
-        raise SeedError(
-            f"O banco já tem {already_loaded} filmes. Use --reset para limpar e recarregar."
-        )
+        load_movies_reviews_only(engine, files, tables)
+        engine.dispose()
+        return
 
     selected: set[str] | None = None
     if limit is not None:
@@ -282,7 +338,13 @@ def run(data_dir: Path, limit: int | None, reset: bool) -> None:
         load("dim_people", keep=in_set("sk_person_id", only_people))
         load("dim_companies", keep=in_set("sk_company_id", only_companies))
         load("fact_movies_performance", keep=by_movie)
-        load("movies_reviews", keep=by_movie)
+        if "movies_reviews" in files:
+            load("movies_reviews", keep=by_movie)
+        else:
+            print(
+                "Aviso: movies_reviews.csv não encontrado; pulando carga de avaliações "
+                "(pode ser importado depois com este mesmo comando)."
+            )
 
         violations = conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
         if violations:
