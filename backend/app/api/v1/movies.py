@@ -1,9 +1,9 @@
 from typing import Annotated
 
-from app.db.session import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import get_db
 from app.movies.schemas import (
     MovieCreate,
     MovieDetail,
@@ -12,8 +12,8 @@ from app.movies.schemas import (
     PaginatedMovies,
     PaginatedReviews,
 )
-
 from app.movies.service import (
+    MovieConflictError,
     MovieWriteError,
     create_movie,
     create_movie_review,
@@ -25,6 +25,21 @@ from app.movies.service import (
 )
 
 router = APIRouter()
+
+@router.post("", response_model=MovieDetail, status_code=status.HTTP_201_CREATED)
+async def post_movie(
+    payload: MovieCreate,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MovieDetail:
+    try:
+        movie = await create_movie(db, payload)
+    except MovieConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except MovieWriteError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    response.headers["Location"] = f"/api/v1/movies/{movie.sk_movie_id}"
+    return movie
 
 
 @router.get("", response_model=PaginatedMovies)
@@ -86,21 +101,6 @@ async def get_movie(
         raise HTTPException(status_code=404, detail="Filme não encontrado")
     return movie
 
-
-@router.post("", response_model=MovieDetail, status_code=status.HTTP_201_CREATED)
-async def post_movie(
-    payload: MovieCreate,
-    response: Response,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> MovieDetail:
-    try:
-        movie = await create_movie(db, payload)
-    except MovieWriteError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    response.headers["Location"] = f"/api/v1/movies/{movie.sk_movie_id}"
-    return movie
-
-
 @router.put("/{sk_movie_id}", response_model=MovieDetail)
 async def put_movie(
     sk_movie_id: str,
@@ -109,6 +109,8 @@ async def put_movie(
 ) -> MovieDetail:
     try:
         movie = await update_movie(db, sk_movie_id, payload)
+    except MovieConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except MovieWriteError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if movie is None:

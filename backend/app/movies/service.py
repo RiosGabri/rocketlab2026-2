@@ -2,12 +2,12 @@
 
 from uuid import uuid4
 
-from app.movies.models import DimGenre, DimMovie, DimPerson, MovieReview
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.movies.models import DimGenre, DimMovie, DimPerson, MovieReview
 from app.movies.schemas import (
     MovieCreate,
     MovieDetail,
@@ -21,7 +21,11 @@ from app.movies.schemas import (
 
 
 class MovieWriteError(Exception):
-    """Erro de validação de negócio no cadastro ou na atualização de um filme."""
+    """Erro de validação de negócio no cadastro ou na atualização de um filme (422)."""
+
+
+class MovieConflictError(MovieWriteError):
+    """Violação de unicidade/integridade no banco ao gravar o filme (409)."""
 
 
 async def list_movies(
@@ -292,15 +296,15 @@ async def create_movie(db: AsyncSession, payload: MovieCreate) -> MovieDetail:
         url_backdrop=payload.url_backdrop,
         genres=genres,
     )
+    db.add(movie)
     if payload.diretor:
         movie.people.append(await _get_or_create_director(db, payload.diretor))
 
-    db.add(movie)
     try:
         await db.commit()
     except IntegrityError as error:
         await db.rollback()
-        raise MovieWriteError(
+        raise MovieConflictError(
             "não foi possível cadastrar o filme (dado duplicado ou inválido)"
         ) from error
 
@@ -390,7 +394,7 @@ async def update_movie(
         await db.commit()
     except IntegrityError as error:
         await db.rollback()
-        raise MovieWriteError(
+        raise MovieConflictError(
             "não foi possível atualizar o filme (dado duplicado ou inválido)"
         ) from error
 

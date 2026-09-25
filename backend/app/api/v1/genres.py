@@ -1,9 +1,9 @@
 from typing import Annotated
 
-from app.db.session import get_db
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import get_db
 from app.movies.schemas import GenreOut
 from app.movies.service import list_genres
 
