@@ -11,5 +11,6 @@ htmlcov/
 *.db-shm
 *.db-wal
 *.db-journal
+!rocketlab.db
 *.sqlite3
 data/
